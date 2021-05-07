@@ -1,0 +1,152 @@
+---
+title: "ASM_Assignment03"
+author: "Robert Wilbrand"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, message = FALSE, warning = FALSE}
+# load necessary packages
+library(rethinking)
+library(tidyverse)
+library(brms)
+data(Howell1)
+
+# set global options
+theme_set(theme_minimal())
+knitr::opts_knit$set(root.dir = "C:/MSc GCG/2021_SoSe/ASM")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+options(scipen = 8) # disables scientific notation up to 8 digits
+
+# Wrapper function to set a specified seed prior to function execution
+# useful because it leaves the seed outside the function unaffected
+seedFunc <- function(func, seed, ...){
+  set.seed(seed)
+  func(...)
+}
+```
+
+## 4E3.
+
+$$y_i ∼ Normal(μ, σ)$$
+$$\mu ∼ Normal(0, 10)$$
+$$\sigma ∼ Exponential(1)$$
+
+*Using the model definition above, write down the appropriate form of Bayes’ theorem that includes the proper likelihood and priors.*
+
+$$\Pr(μ, σ|y) = \frac{\Pi_i Normal(y_i|μ,σ)Normal(μ|0,10)Exponential(σ|1)}{\int\int \Pi_i Normal(y_i|μ,σ)Normal(μ|0,10)Exponential(σ|1)dμ dσ}$$
+
+## 4M1.
+
+*For the model definition below, simulate observed y values from the prior (not the posterior).*
+
+$$y_i ∼ Normal(μ, σ)$$
+$$\mu ∼ Normal(0, 10)$$
+$$\sigma ∼ Exponential(1)$$
+
+
+```{r}
+# Visualize the shape of priors
+curve(dnorm(x, 0, 10), from = -25, to = 25)
+curve(dexp(x, 1), from = 0, to = 5)
+
+# Take 5000 samples from each prior
+smpl_mu    <- rnorm(5000, 0, 10)
+smpl_sig   <- rexp( 5000, 1)
+smpl_prior <- rnorm(5000, smpl_mu, smpl_sig)
+
+# Inspect resulting prior distribution
+dens(smpl_prior, norm.comp = T)
+```
+
+## 4H2.
+
+*Select out all the rows in the Howell1 data with ages below 18 years of age. If you do it right, you should end up with a new data frame with 192 rows in it.*
+
+$(a)$ *Fit a linear regression to these data, using brms. Present and interpret the estimates. For every 10 units of increase in weight, how much taller does the model predict a child gets?*
+
+```{r}
+# Subset and inspect data
+below_18 <- filter(Howell1, age < 18) %>% as_tibble
+glimpse(below_18)
+```
+
+```{r, results='hide'}
+# Results hidden to prevent unnecessary output in the knitted document
+b4.1 <- 
+  brm(data = below_18, 
+      family = gaussian,
+      height ~ 1 + weight,
+      prior = c(prior(normal(115, 25), class = Intercept),
+                prior(uniform(0, 50), class = sigma)),
+      iter = 31000, warmup = 30000, chains = 4, cores = 4,
+      seed = 45)
+```
+
+```{r}
+summary(b4.1)
+plot(b4.1)
+```
+
+The estimate for weight can be interpreted as `r posterior_summary(b4.1)[2] %>% round(2)` centimeters per 1kg increase in weight. Therefore we would expect a child that is 10 kg heavier to be `r 10*posterior_summary(b4.1)[2] %>% round(2)`cm taller. The intercept has no physical interpretation in the real world, since nothing can have a weight of zero.
+
+$(b)$ *Plot the raw data, with height on the vertical axis and weight on the horizontal axis. Superimpose the MAP regression line and 89% interval for the mean. Also superimpose the 89% interval for predicted heights.*
+
+```{r}
+# Plot for the raw data - everything else will be added to it
+ggRaw <- ggplot(below_18, aes(weight, height)) +
+  geom_point(color = 'red', shape = 1, size = 2)
+
+# The summary contains slope and intercept for the regression line
+smry_post <- posterior_summary(b4.1)
+
+# This covers the range of observed weights in the data
+weight_seq <- tibble(weight = 4:45)
+
+# Generate estimates of the mean for new data
+fit_height <- 
+  fitted(b4.1,
+         probs = c(0.055, 0.945),
+         newdata = weight_seq) %>% 
+  as_tibble %>%
+  bind_cols(weight_seq)
+
+# Simulate data, generating 5.5% and 94.5% quantiles
+pred_height <-
+  predict(b4.1,
+          probs = c(0.055, 0.945),
+          newdata = weight_seq) %>% 
+  as_tibble %>%
+  bind_cols(weight_seq)
+
+# Plot raw data, regression line and both 89% intervals
+ggRaw +
+  geom_abline(intercept = smry_post[1], slope = smry_post[2],
+              color = "darkgreen",
+              size = 0.8) +
+  geom_smooth(data = fit_height,
+              aes(y = Estimate, ymin = Q5.5, ymax = Q94.5),
+              stat = "identity",
+              alpha = 0.6,
+              color = NA) +
+  geom_smooth(data = pred_height,
+              aes(y = Estimate, ymin = Q5.5, ymax = Q94.5),
+              stat = "identity",
+              alpha = 0.3,
+              color = NA) +
+  theme_bw() +
+  labs(x = "Weight", y = "Height")
+```
+
+$(c)$ *What aspects of the model fit concern you? Describe the kinds of assumptions you would change, if any, to improve the model. You don’t have to write any new code. Just explain what the model appears to be doing a bad job of, and what you hypothesize would be a better model.*
+
+Looking at the plot above, it is easy to see that the linear model is making weak predictions at the fringes of the data range, where few of the actual observations fall into the 89% prediction interval.
+Even in the middle part of the data range, the regression line should roughly divide the data into equal parts - that is clearly not the case.
+The golem is trying to fit a square peg into a round hole. It doesn't know any better.  
+So how can we teach our golem to make better predictions?
+
+```{r}
+ggRaw + scale_x_log10() + theme_bw()
+```
+
+By log-transforming the x-axis, we arrive at a relationship that looks much more linear. It is time to teach our golem logging.
