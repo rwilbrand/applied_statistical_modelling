@@ -1,0 +1,231 @@
+---
+title: "ASM_Assignment04"
+author: "Robert Wilbrand"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, message = FALSE, warning = FALSE}
+# load necessary packages
+library(tidyverse)
+library(brms)
+library(dagitty)
+library(ggdag)
+data(WaffleDivorce, package = "rethinking")
+
+# set global options
+theme_set(theme_minimal())
+knitr::opts_knit$set(root.dir = "C:/MSc GCG/2021_SoSe/ASM")
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+options(scipen = 8) # disables scientific notation up to 8 digits
+
+# Wrapper function to set a specified seed prior to function execution
+# useful because it leaves the seed outside the function unaffected
+seedFunc <- function(seed, func, ...){
+  set.seed(seed)
+  func(...)
+}
+```
+
+## 5H4.
+*Here is an open practice problem to engage your imagination. In the divorce data, States in the southern United States have many of the highest divorce rates. Add the South indicator variable to the analysis. First, draw one or more DAGs that represent your ideas for how Southern American culture might influence any of the other three variables (D, M or A). Then list the testable implications of your DAGs, if there are any, and fit one or more models to evaluate the implications. What do you think the influence of “Southernness” is?*
+
+Before considering DAGs, I compute population-weighted summaries of the variables, grouped by whether the state in question is in the South or not.
+
+```{r}
+WaffleDivorce <- as_tibble(WaffleDivorce)
+northSouthSummaries <- WaffleDivorce %>% 
+  group_by(South) %>% 
+  summarise(meanMarriage = weighted.mean(Marriage, Population),
+            meanMedianMA = weighted.mean(MedianAgeMarriage, Population),
+            meanDivorce  = weighted.mean(Divorce, Population))
+
+flextable::flextable(round(northSouthSummaries, 2))
+```
+
+From this, it can be seen that both marriage and divorce rates are more than 1.5 percentage points higher in the South, while the median age at marriage is almost exactly 1 year lower.
+
+The South of the United States is demographically different from the rest of the US in two key aspects:
+
+$(1)$ **Religion plays a bigger role**
+$(2)$ **Southern states lean more conservative**
+
+Additionally, large parts of the South have considerably higher percentages of African-Americans (e.g. in Mississippi and Alabama) and Latinos (e.g. in Florida and Texas), but this is too spatially heterogeneous to consider here.
+
+It isn't hard to imagine that more value would be placed on marriage as an institution in a, broadly speaking, more conservative Christian cultural context when compared to the country as a whole.  
+Likewise, the societal stigma against divorce might be stronger, and this difference might translate into a statistically observable effect.
+
+The following DAG is consistent with this interpretation:
+
+```{r}
+dag1 <- dagify(
+  A ~ S,
+  D ~ A + S,
+  M ~ A + S
+)
+
+ggdag(dag1) + theme_dag()
+```
+
+All the connections from the second DAG in McElreath's book are kept, but with an added influence of Southernness for each of the other variables.
+
+This leads to the following conditional independencies:
+
+```{r}
+impliedConditionalIndependencies(dag1)
+```
+
+In other words, divorce rates are independent of marriage rates given both Southernness and age at marriage.
+
+This can be contrasted with the following alternative DAG:
+
+```{r}
+dag2 <- dagify(
+  A ~ S,
+  D ~ A,
+  M ~ A + S
+)
+
+ggdag(dag2) + theme_dag()
+```
+
+Here, the influence of Southernness has been removed. While the stigma against divorce might be stronger among conservatives, society as a whole has evolved to a point where divorce is treated as much more normal. Most married couples would probably not stay in a failed marriage because of the stigma alone.
+
+The testable implications of this DAG are as follows:
+
+```{r}
+impliedConditionalIndependencies(dag2)
+```
+
+So neither M nor S should add much information in models that also include A.
+
+To test the implications of both DAGs, models need to be created.
+
+```{r}
+# Prepare the data
+WaffleDivorce <-
+  mutate(WaffleDivorce,
+         "A" = scale(MedianAgeMarriage) %>% as.numeric,
+         "M" = scale(Marriage) %>% as.numeric,
+         "D" = scale(Divorce) %>% as.numeric,
+         across(South, as.factor))
+```
+
+
+```{r, results='hide'}
+divorce1 <- brm(
+  data = WaffleDivorce,
+  family = gaussian,
+  D ~ 0 + A + M + South,
+  prior = c(#prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, cores = 4, chains = 4,
+  seed = 432
+)
+
+divorce2 <- brm(
+  data = WaffleDivorce,
+  family = gaussian,
+  D ~ 0 + A + South,
+  prior = c(#prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, cores = 4, chains = 4,
+  seed = 432
+)
+
+divorce3 <- brm(
+  data = WaffleDivorce,
+  family = gaussian,
+  D ~ 0 + M + South,
+  prior = c(#prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, cores = 4, chains = 4,
+  seed = 432
+)
+
+divorce4 <- brm(
+  data = WaffleDivorce,
+  family = gaussian,
+  D ~ 1 + A + M,
+  prior = c(prior(normal(0, 0.2), class = Intercept),
+            prior(normal(0, 0.5), class = b),
+            prior(exponential(1), class = sigma)),
+  iter = 2000, warmup = 1000, cores = 4, chains = 4,
+  seed = 432
+)
+```
+
+```{r}
+walk(list(divorce1, divorce2, divorce3, divorce4), plot)
+purrr::map(list(divorce1, divorce2, divorce3, divorce4), summary)
+```
+
+
+The first model includes all 3 predictors, while the following models exclude M, A and South respectively.
+
+A plot of the posterior compatibility intervals should shed some light on what these models can tell us about the testable implications of the DAGs.
+
+```{r}
+bind_cols(posterior_samples(divorce1) %>%
+            transmute(`div1_beta[A]` = b_A,
+                      `div1_beta[M]` = b_M,
+                      `div1_South0` = b_South0,
+                      `div1_South1` = b_South1),
+          posterior_samples(divorce2) %>%
+            transmute(`div2_beta[A]` = b_A,
+                      `div2_South0` = b_South0,
+                      `div2_South1` = b_South1),
+          posterior_samples(divorce3) %>%
+            transmute(`div3_beta[M]` = b_M,
+                      `div3_South0` = b_South0,
+                      `div3_South1` = b_South1),
+          posterior_samples(divorce4) %>% 
+            transmute(`div4_beta[A]` = b_A,
+                      `div4_beta[M]` = b_M)) %>% 
+  pivot_longer(everything()) %>% 
+  group_by(name) %>% 
+  summarise(mean = mean(value),
+            ll = quantile(value, prob = .055),
+            ul = quantile(value, prob = .945)) %>% 
+  separate(col = name, into = c("fit", "parameter"), sep = "_") %>% 
+  ggplot(aes(x = mean, xmin = ll, xmax = ul, y = fit)) +
+  geom_vline(xintercept = 0, alpha = 0.15) +
+  geom_pointrange(color = 'goldenrod4') +
+  labs(x = "posterior", y = NULL) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        strip.background = element_rect(fill = "transparent", color = "transparent")) +
+  facet_wrap(~parameter, ncol = 1, labeller = label_parsed)
+```
+
+Let's recall the conditional independencies:
+
+```{r}
+impliedConditionalIndependencies(dag1)
+impliedConditionalIndependencies(dag2)
+```
+
+The plot above shows that M adds little additional information as long as A is also included in the model, regardless of whether S is also included. This is so far consistent with statements 1 and 2.  
+The interpretation is a little less clear for statement 3. While the compatibility intervals cross the zero line except in model 3 (where A is missing), the bulk of the distribution is on the positive side of the spectrum. Still, since statement 3 is not technically violated, I would be hesitant to rule out the associated DAG.
+
+Likewise, Markov equivalent DAGs also cannot be ruled out at this point. For example, consider the following DAG:
+
+```{r}
+dag3 <- dagify(
+  A ~ M + S,
+  D ~ A,
+  M ~ S
+)
+
+ggdag(dag3) + theme_dag()
+impliedConditionalIndependencies(dag3)
+```
+
+This is the same as DAG 2, but with the arrow switched between A and M. The interpretation is that A is influenced by M, but not vice versa - if I imagine being in a cultural context where most of my social circle is getting married, I might be more likely to get married myself, and to do so earlier than I otherwise would (not to mention that weddings themselves could be where many people meet their future spouses).  
+Since DAG 2 and 3 have the same conditional independencies, they are Markov equivalent and no conclusion can be drawn from the data alone about which is more probable.
+
+Overall, the data seems more compatible with DAG 1 than DAG 2, but my hypothesized explanation of a stronger stigma against divorce is at odds with the observation that divorce rates are indeed higher in the South. What might be happening instead is that people in the South are more willing to enter into a marriage at lower levels of certainty. To test this hypothesis, it would be interesting to have access to data about the average duration of courtship (i.e. the time between first meeting and marriage).  
+Another factor might be if the family plays a bigger role in choosing a partner, leading to more unfulfilling marriages in the process.
